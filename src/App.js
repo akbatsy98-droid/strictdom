@@ -7,61 +7,74 @@ import {
   onAuthStateChanged
 } from 'firebase/auth'
 import {
-  collection,
-  addDoc,
-  getDocs,
-  doc,
-  setDoc,
-  query,
-  where
+  collection, doc, setDoc, getDoc, getDocs,
+  addDoc, query, where, orderBy, onSnapshot,
+  serverTimestamp, updateDoc, arrayUnion
 } from 'firebase/firestore'
 
-const KINKS = [
-  "Bondage", "Discipline", "Dominance", "Submission",
-  "Sadism", "Masochism", "Role Play", "Sensation Play",
-  "Power Exchange", "Service", "Praise Kink", "Impact Play",
-  "Pet Play", "Age Play", "Exhibitionism", "Voyeurism"
-]
-
-const roleColors = {
-  Dom: { accent: "#c9a84c" },
-  Sub: { accent: "#8b5cf6" },
-  Switch: { accent: "#06b6d4" },
-}
+const roleColors = { Dom: '#c9a84c', Sub: '#8b5cf6', Switch: '#06b6d4' }
 
 export default function App() {
-  const [screen, setScreen] = useState('onboarding')
   const [user, setUser] = useState(null)
-  const [profiles, setProfiles] = useState([])
-  const [selectedProfile, setSelectedProfile] = useState(null)
-  const [filterRole, setFilterRole] = useState('All')
+  const [profile, setProfile] = useState(null)
+  const [screen, setScreen] = useState('onboarding')
   const [loading, setLoading] = useState(false)
-  const [step, setStep] = useState(1)
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [authMode, setAuthMode] = useState('login')
-  const [form, setForm] = useState({
-    name: '', age: '', role: 'Sub', bio: '', location: '',
-    kinks: [], tasks: [], is_private: false
-  })
-  const [taskInput, setTaskInput] = useState('')
+  const [form, setForm] = useState({ name: '', age: '', role: 'Sub', bio: '' })
+  const [connections, setConnections] = useState([])
+  const [selectedConnection, setSelectedConnection] = useState(null)
+  const [messages, setMessages] = useState([])
+  const [newMessage, setNewMessage] = useState('')
+  const [tasks, setTasks] = useState([])
+  const [newTask, setNewTask] = useState('')
+  const [disciplineLog, setDisciplineLog] = useState([])
+  const [newNote, setNewNote] = useState('')
+  const [mood, setMood] = useState('')
+  const [inviteEmail, setInviteEmail] = useState('')
+  const [invitePin, setInvitePin] = useState('')
+  const [enterPin, setEnterPin] = useState('')
+  const [activeTab, setActiveTab] = useState('messages')
+  const [notification, setNotification] = useState('')
+
+  const notify = (msg) => { setNotification(msg); setTimeout(() => setNotification(''), 3000) }
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, (u) => {
-      setUser(u)
-      if (u) { setScreen('browse'); fetchProfiles() }
+    const unsub = onAuthStateChanged(auth, async (u) => {
+      if (u) {
+        setUser(u)
+        const snap = await getDoc(doc(db, 'profiles', u.uid))
+        if (snap.exists()) {
+          setProfile(snap.data())
+          setScreen('home')
+          loadConnections(u.uid, snap.data().role)
+        } else {
+          setScreen('create')
+        }
+      } else {
+        setUser(null)
+        setProfile(null)
+        setScreen('onboarding')
+      }
     })
     return () => unsub()
   }, [])
 
-  const fetchProfiles = async () => {
-    setLoading(true)
-    try {
-      const q = query(collection(db, 'profiles'), where('is_private', '==', false))
-      const snapshot = await getDocs(q)
-      setProfiles(snapshot.docs.map(d => ({ id: d.id, ...d.data() })))
-    } catch (e) { console.error(e) }
-    setLoading(false)
+  const loadConnections = async (uid, role) => {
+    const field = role === 'Dom' ? 'domId' : 'subId'
+    const q = query(collection(db, 'connections'), where(field, '==', uid), where('status', '==', 'active'))
+    const snap = await getDocs(q)
+    const conns = []
+    for (const d of snap.docs) {
+      const data = d.data()
+      const otherId = role === 'Dom' ? data.subId : data.domId
+      const otherSnap = await getDoc(doc(db, 'profiles', otherId))
+      if (otherSnap.exists()) {
+        conns.push({ connId: d.id, ...data, otherProfile: { id: otherId, ...otherSnap.data() } })
+      }
+    }
+    setConnections(conns)
   }
 
   const handleAuth = async () => {
@@ -69,99 +82,179 @@ export default function App() {
     try {
       if (authMode === 'signup') {
         await createUserWithEmailAndPassword(auth, email, password)
-        setScreen('create')
       } else {
         await signInWithEmailAndPassword(auth, email, password)
-        setScreen('browse')
-        fetchProfiles()
       }
-    } catch (e) { alert(e.message) }
+    } catch (e) { notify(e.message) }
     setLoading(false)
   }
 
   const handleCreateProfile = async () => {
+    if (!form.name || !form.age || form.age < 18) return notify('Please fill all fields. Must be 18+')
     setLoading(true)
     try {
       await setDoc(doc(db, 'profiles', user.uid), {
-        name: form.name,
-        age: parseInt(form.age),
-        role: form.role,
-        bio: form.bio,
-        location: form.location,
-        kinks: form.kinks,
-        tasks: form.tasks,
-        is_private: form.is_private,
-        createdAt: new Date()
+        ...form, age: parseInt(form.age),
+        email: user.email, createdAt: serverTimestamp()
       })
-      setScreen('browse')
-      fetchProfiles()
-    } catch (e) { alert(e.message) }
+      setProfile(form)
+      setScreen('home')
+      loadConnections(user.uid, form.role)
+    } catch (e) { notify(e.message) }
     setLoading(false)
   }
 
-  const handleSignOut = async () => {
-    await signOut(auth)
-    setUser(null)
-    setScreen('onboarding')
-    setProfiles([])
+  const generatePin = () => Math.random().toString(36).substring(2, 8).toUpperCase()
+
+  const handleSendInvite = async () => {
+    if (!inviteEmail) return notify('Enter an email address')
+    setLoading(true)
+    try {
+      const pin = generatePin()
+      await addDoc(collection(db, 'invites'), {
+        fromId: user.uid,
+        fromName: profile.name,
+        fromRole: profile.role,
+        toEmail: inviteEmail,
+        pin,
+        status: 'pending',
+        createdAt: serverTimestamp()
+      })
+      setInvitePin(pin)
+      notify('Invite created! Share this PIN with them.')
+    } catch (e) { notify(e.message) }
+    setLoading(false)
   }
 
-  const toggleKink = (kink) => {
-    setForm(f => ({
-      ...f,
-      kinks: f.kinks.includes(kink) ? f.kinks.filter(k => k !== kink) : [...f.kinks, kink]
-    }))
+  const handleAcceptInvite = async () => {
+    if (!enterPin) return notify('Enter the PIN')
+    setLoading(true)
+    try {
+      const q = query(collection(db, 'invites'), where('pin', '==', enterPin.toUpperCase()), where('status', '==', 'pending'))
+      const snap = await getDocs(q)
+      if (snap.empty) return notify('Invalid or expired PIN')
+      const invite = snap.docs[0]
+      const inviteData = invite.data()
+      const isDomInviting = inviteData.fromRole === 'Dom'
+      const domId = isDomInviting ? inviteData.fromId : user.uid
+      const subId = isDomInviting ? user.uid : inviteData.fromId
+      await addDoc(collection(db, 'connections'), {
+        domId, subId, status: 'active', createdAt: serverTimestamp()
+      })
+      await updateDoc(doc(db, 'invites', invite.id), { status: 'accepted' })
+      notify('🎉 Connection established!')
+      setEnterPin('')
+      loadConnections(user.uid, profile.role)
+      setScreen('home')
+    } catch (e) { notify(e.message) }
+    setLoading(false)
   }
 
-  const addTask = () => {
-    if (taskInput.trim()) {
-      setForm(f => ({ ...f, tasks: [...f.tasks, taskInput.trim()] }))
-      setTaskInput('')
-    }
+  const openConnection = async (conn) => {
+    setSelectedConnection(conn)
+    setActiveTab('messages')
+    setScreen('dynamic')
+    const chatId = [conn.domId, conn.subId].sort().join('_')
+    const q = query(collection(db, 'messages'), where('chatId', '==', chatId), orderBy('createdAt'))
+    onSnapshot(q, (snap) => {
+      setMessages(snap.docs.map(d => ({ id: d.id, ...d.data() })))
+    })
+    const tSnap = await getDocs(query(collection(db, 'tasks'), where('connId', '==', conn.connId)))
+    setTasks(tSnap.docs.map(d => ({ id: d.id, ...d.data() })))
+    const dSnap = await getDocs(query(collection(db, 'disciplineLog'), where('connId', '==', conn.connId), orderBy('createdAt')))
+    setDisciplineLog(dSnap.docs.map(d => ({ id: d.id, ...d.data() })))
   }
 
-  const filteredProfiles = profiles.filter(p =>
-    filterRole === 'All' || p.role === filterRole
-  )
+  const sendMessage = async () => {
+    if (!newMessage.trim()) return
+    const chatId = [selectedConnection.domId, selectedConnection.subId].sort().join('_')
+    await addDoc(collection(db, 'messages'), {
+      chatId, senderId: user.uid,
+      senderName: profile.name,
+      text: newMessage.trim(),
+      createdAt: serverTimestamp()
+    })
+    setNewMessage('')
+  }
+
+  const addTask = async () => {
+    if (!newTask.trim()) return
+    const ref = await addDoc(collection(db, 'tasks'), {
+      connId: selectedConnection.connId,
+      text: newTask.trim(),
+      completed: false,
+      createdBy: user.uid,
+      createdAt: serverTimestamp()
+    })
+    setTasks(t => [...t, { id: ref.id, text: newTask.trim(), completed: false }])
+    setNewTask('')
+  }
+
+  const toggleTask = async (task) => {
+    await updateDoc(doc(db, 'tasks', task.id), { completed: !task.completed })
+    setTasks(t => t.map(x => x.id === task.id ? { ...x, completed: !x.completed } : x))
+  }
+
+  const addDisciplineNote = async () => {
+    if (!newNote.trim()) return
+    const ref = await addDoc(collection(db, 'disciplineLog'), {
+      connId: selectedConnection.connId,
+      note: newNote.trim(),
+      addedBy: user.uid,
+      addedByName: profile.name,
+      createdAt: serverTimestamp()
+    })
+    setDisciplineLog(d => [...d, { id: ref.id, note: newNote.trim(), addedByName: profile.name }])
+    setNewNote('')
+  }
+
+  const submitMood = async () => {
+    if (!mood) return
+    await addDoc(collection(db, 'checkins'), {
+      connId: selectedConnection.connId,
+      subId: user.uid,
+      mood, createdAt: serverTimestamp()
+    })
+    notify('Check-in submitted ✓')
+    setMood('')
+  }
 
   const s = {
     app: { minHeight: '100vh', background: '#0f0f14', color: '#e8e8e0', fontFamily: 'Georgia, serif' },
-    nav: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '20px 28px', borderBottom: '1px solid #1e1e2a', position: 'sticky', top: 0, background: '#0f0f14', zIndex: 10 },
-    logo: { fontSize: '22px', fontWeight: 600, letterSpacing: '0.12em' },
-    logoAccent: { color: '#c9a84c' },
-    body: { maxWidth: 480, margin: '0 auto', width: '100%', padding: '0 0 60px' },
+    nav: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 24px', borderBottom: '1px solid #1e1e2a', position: 'sticky', top: 0, background: '#0f0f14', zIndex: 10 },
+    logo: { fontSize: '20px', fontWeight: 600, letterSpacing: '0.1em' },
+    accent: { color: '#c9a84c' },
+    body: { maxWidth: 480, margin: '0 auto', padding: '0 0 80px' },
     center: { display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '88vh', padding: '0 28px', textAlign: 'center' },
-    heroTitle: { fontSize: '52px', fontWeight: 300, lineHeight: 1.1, marginBottom: '16px', letterSpacing: '0.04em' },
-    heroSub: { fontSize: '16px', color: '#888', lineHeight: 1.7, marginBottom: '44px', maxWidth: 320, fontFamily: 'sans-serif', fontWeight: 300 },
-    pillBtn: (active) => ({ padding: '13px 32px', borderRadius: '40px', fontSize: '14px', fontFamily: 'sans-serif', fontWeight: 500, letterSpacing: '0.08em', cursor: 'pointer', transition: 'all 0.2s', border: active ? 'none' : '1px solid #333', background: active ? '#c9a84c' : 'transparent', color: active ? '#0f0f14' : '#e8e8e0' }),
-    input: { width: '100%', background: '#13131a', border: '1px solid #1e1e2c', borderRadius: '6px', padding: '12px 14px', color: '#e8e8e0', fontSize: '15px', fontFamily: 'Georgia, serif', marginBottom: '16px', boxSizing: 'border-box', outline: 'none' },
-    btn: (color) => ({ width: '100%', padding: '14px', borderRadius: '6px', background: color || '#c9a84c', color: color ? '#e8e8e0' : '#0f0f14', border: 'none', fontSize: '14px', fontFamily: 'sans-serif', fontWeight: 600, letterSpacing: '0.08em', cursor: 'pointer', marginBottom: '10px' }),
+    input: { width: '100%', background: '#13131a', border: '1px solid #1e1e2c', borderRadius: '6px', padding: '12px 14px', color: '#e8e8e0', fontSize: '15px', fontFamily: 'Georgia, serif', marginBottom: '14px', boxSizing: 'border-box', outline: 'none' },
+    btn: (bg, color) => ({ width: '100%', padding: '13px', borderRadius: '6px', background: bg || '#c9a84c', color: color || '#0f0f14', border: 'none', fontSize: '14px', fontFamily: 'sans-serif', fontWeight: 600, letterSpacing: '0.06em', cursor: 'pointer', marginBottom: '10px' }),
     label: { display: 'block', fontSize: '10px', letterSpacing: '0.15em', color: '#555', fontFamily: 'sans-serif', textTransform: 'uppercase', marginBottom: '8px', fontWeight: 600 },
-    card: { background: '#13131a', padding: '22px 20px', cursor: 'pointer', borderBottom: '1px solid #1a1a25', display: 'flex', alignItems: 'flex-start', gap: '16px' },
-    avatar: (role) => ({ width: 52, height: 52, borderRadius: '50%', background: '#1e1e2c', border: `2px solid ${roleColors[role]?.accent || '#333'}`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '20px', fontWeight: 600, flexShrink: 0, color: roleColors[role]?.accent || '#ccc' }),
-    badge: (role) => ({ fontSize: '10px', fontFamily: 'sans-serif', letterSpacing: '0.1em', fontWeight: 600, color: roleColors[role]?.accent || '#ccc', border: `1px solid ${roleColors[role]?.accent || '#555'}`, padding: '2px 7px', borderRadius: '20px', textTransform: 'uppercase' }),
-    kinkPill: (on) => ({ padding: '5px 13px', borderRadius: '20px', fontSize: '12px', fontFamily: 'sans-serif', border: on ? '1px solid #c9a84c' : '1px solid #222', color: on ? '#c9a84c' : '#666', background: 'transparent', cursor: 'pointer', margin: '3px' }),
+    card: (active) => ({ background: active ? '#1a1a26' : '#13131a', padding: '18px 20px', cursor: 'pointer', borderBottom: '1px solid #1a1a25', display: 'flex', alignItems: 'center', gap: '14px' }),
+    avatar: (role) => ({ width: 46, height: 46, borderRadius: '50%', background: '#1e1e2c', border: `2px solid ${roleColors[role] || '#333'}`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '18px', fontWeight: 600, flexShrink: 0, color: roleColors[role] || '#ccc' }),
+    badge: (role) => ({ fontSize: '9px', fontFamily: 'sans-serif', letterSpacing: '0.1em', fontWeight: 600, color: roleColors[role] || '#ccc', border: `1px solid ${roleColors[role] || '#555'}`, padding: '2px 6px', borderRadius: '20px', textTransform: 'uppercase' }),
+    tab: (active) => ({ flex: 1, padding: '10px', background: active ? '#1e1e2c' : 'transparent', border: 'none', borderBottom: active ? `2px solid #c9a84c` : '2px solid transparent', color: active ? '#c9a84c' : '#555', fontSize: '12px', fontFamily: 'sans-serif', letterSpacing: '0.08em', cursor: 'pointer', textTransform: 'uppercase' }),
+    msg: (mine) => ({ display: 'flex', justifyContent: mine ? 'flex-end' : 'flex-start', marginBottom: '10px' }),
+    msgBubble: (mine) => ({ maxWidth: '75%', padding: '10px 14px', borderRadius: mine ? '16px 16px 4px 16px' : '16px 16px 16px 4px', background: mine ? '#c9a84c' : '#1e1e2c', color: mine ? '#0f0f14' : '#e8e8e0', fontSize: '14px', fontFamily: 'sans-serif', lineHeight: 1.5 }),
+    roleBtn: (active, role) => ({ flex: 1, padding: '11px', borderRadius: '6px', fontSize: '13px', fontFamily: 'sans-serif', fontWeight: 500, cursor: 'pointer', border: `1px solid ${active ? roleColors[role] : '#1e1e2c'}`, background: active ? '#1e1e2c' : 'transparent', color: active ? roleColors[role] : '#555' }),
     section: { padding: '20px 24px', borderBottom: '1px solid #1a1a25' },
-    sectionLabel: { fontSize: '10px', letterSpacing: '0.15em', color: '#555', fontFamily: 'sans-serif', fontWeight: 600, textTransform: 'uppercase', marginBottom: '12px' },
-    roleBtn: (active, role) => ({ flex: 1, padding: '11px 6px', borderRadius: '6px', fontSize: '13px', fontFamily: 'sans-serif', fontWeight: 500, cursor: 'pointer', border: `1px solid ${active ? roleColors[role]?.accent : '#1e1e2c'}`, background: active ? '#1e1e2c' : 'transparent', color: active ? roleColors[role]?.accent : '#555' }),
-    toggle: (on) => ({ width: 40, height: 22, borderRadius: '11px', background: on ? '#c9a84c' : '#1e1e2c', position: 'relative', cursor: 'pointer', border: 'none' }),
-    toggleThumb: (on) => ({ position: 'absolute', top: 3, left: on ? 20 : 3, width: 16, height: 16, borderRadius: '50%', background: '#fff', transition: 'left 0.2s' }),
-    stepDot: (active) => ({ width: active ? 20 : 6, height: 6, borderRadius: '3px', background: active ? '#c9a84c' : '#222', transition: 'all 0.2s' }),
-    filterBtn: (active) => ({ padding: '7px 18px', borderRadius: '30px', fontSize: '13px', fontFamily: 'sans-serif', cursor: 'pointer', border: active ? 'none' : '1px solid #2a2a38', background: active ? '#c9a84c' : '#16161f', color: active ? '#0f0f14' : '#888' }),
+    sLabel: { fontSize: '10px', letterSpacing: '0.15em', color: '#555', fontFamily: 'sans-serif', fontWeight: 600, textTransform: 'uppercase', marginBottom: '12px' },
+    notif: { position: 'fixed', bottom: 80, left: '50%', transform: 'translateX(-50%)', background: '#c9a84c', color: '#0f0f14', padding: '10px 20px', borderRadius: '20px', fontSize: '13px', fontFamily: 'sans-serif', fontWeight: 600, zIndex: 100, whiteSpace: 'nowrap' },
+    bottomNav: { position: 'fixed', bottom: 0, left: 0, right: 0, background: '#0f0f14', borderTop: '1px solid #1e1e2a', display: 'flex', zIndex: 10 },
+    bottomBtn: (active) => ({ flex: 1, padding: '12px', background: 'none', border: 'none', color: active ? '#c9a84c' : '#444', fontSize: '11px', fontFamily: 'sans-serif', cursor: 'pointer', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '3px' }),
   }
 
   // ONBOARDING
   if (screen === 'onboarding') return (
     <div style={s.app}>
       <div style={s.center}>
-        <div style={{ fontSize: '13px', letterSpacing: '0.2em', color: '#555', fontFamily: 'sans-serif', marginBottom: '20px', textTransform: 'uppercase' }}>Welcome to</div>
-        <h1 style={s.heroTitle}>StrictDom<span style={s.logoAccent}>.</span></h1>
-        <p style={s.heroSub}>A quiet space to find your dynamic. Built on consent, communication, and compatibility.</p>
+        <div style={{ fontSize: '11px', letterSpacing: '0.2em', color: '#555', fontFamily: 'sans-serif', marginBottom: '16px', textTransform: 'uppercase' }}>Welcome to</div>
+        <h1 style={{ fontSize: '48px', fontWeight: 300, lineHeight: 1.1, marginBottom: '16px', letterSpacing: '0.04em' }}>StrictDom<span style={s.accent}>.</span></h1>
+        <p style={{ fontSize: '15px', color: '#666', lineHeight: 1.7, marginBottom: '40px', maxWidth: 300, fontFamily: 'sans-serif', fontWeight: 300 }}>A private space for Doms and Subs to connect, grow, and maintain their dynamic.</p>
         <div style={{ display: 'flex', gap: '12px' }}>
-          <button style={s.pillBtn(true)} onClick={() => setScreen('auth')}>Get Started</button>
-          <button style={s.pillBtn(false)} onClick={() => { setScreen('browse'); fetchProfiles() }}>Browse</button>
+          <button style={{ ...s.btn(), width: 'auto', padding: '13px 32px', borderRadius: '40px', marginBottom: 0 }} onClick={() => { setAuthMode('signup'); setScreen('auth') }}>Get Started</button>
+          <button style={{ ...s.btn('#transparent', '#e8e8e0'), width: 'auto', padding: '13px 32px', borderRadius: '40px', border: '1px solid #333', marginBottom: 0 }} onClick={() => { setAuthMode('login'); setScreen('auth') }}>Sign In</button>
         </div>
-        <p style={{ marginTop: '40px', fontSize: '11px', color: '#3a3a4a', fontFamily: 'sans-serif' }}>18+ only · Safe, sane & consensual</p>
+        <p style={{ marginTop: '40px', fontSize: '11px', color: '#333', fontFamily: 'sans-serif' }}>18+ only · Safe, sane & consensual</p>
       </div>
     </div>
   )
@@ -170,177 +263,221 @@ export default function App() {
   if (screen === 'auth') return (
     <div style={s.app}>
       <nav style={s.nav}>
-        <span style={s.logo}>StrictDom<span style={s.logoAccent}>.</span></span>
+        <span style={s.logo}>StrictDom<span style={s.accent}>.</span></span>
         <button style={{ background: 'none', border: 'none', color: '#555', cursor: 'pointer', fontFamily: 'sans-serif' }} onClick={() => setScreen('onboarding')}>Back</button>
       </nav>
-      <div style={{ ...s.body, padding: '40px 28px' }}>
-        <h2 style={{ fontSize: '26px', fontWeight: 400, marginBottom: '6px' }}>{authMode === 'login' ? 'Welcome back' : 'Create account'}</h2>
-        <p style={{ fontSize: '13px', color: '#666', marginBottom: '28px', fontFamily: 'sans-serif' }}>18+ only. All interactions must be consensual.</p>
+      <div style={{ ...s.body, padding: '40px 24px' }}>
+        <h2 style={{ fontSize: '24px', fontWeight: 400, marginBottom: '6px' }}>{authMode === 'login' ? 'Welcome back' : 'Create account'}</h2>
+        <p style={{ fontSize: '13px', color: '#555', marginBottom: '28px', fontFamily: 'sans-serif' }}>18+ only. All interactions must be consensual.</p>
         <label style={s.label}>Email</label>
         <input style={s.input} type="email" placeholder="your@email.com" value={email} onChange={e => setEmail(e.target.value)} />
         <label style={s.label}>Password</label>
         <input style={s.input} type="password" placeholder="••••••••" value={password} onChange={e => setPassword(e.target.value)} />
-        <button style={s.btn()} onClick={handleAuth} disabled={loading}>
-          {loading ? 'Please wait...' : authMode === 'login' ? 'Sign In' : 'Create Account'}
-        </button>
-        <button style={s.btn('#1e1e2c')} onClick={() => setAuthMode(authMode === 'login' ? 'signup' : 'login')}>
+        <button style={s.btn()} onClick={handleAuth} disabled={loading}>{loading ? 'Please wait...' : authMode === 'login' ? 'Sign In' : 'Create Account'}</button>
+        <button style={s.btn('#1e1e2c', '#888')} onClick={() => setAuthMode(authMode === 'login' ? 'signup' : 'login')}>
           {authMode === 'login' ? "Don't have an account? Sign up" : 'Already have an account? Sign in'}
         </button>
       </div>
+      {notification && <div style={s.notif}>{notification}</div>}
     </div>
   )
 
-  // PROFILE CREATION
+  // CREATE PROFILE
   if (screen === 'create') return (
     <div style={s.app}>
       <nav style={s.nav}>
-        <span style={s.logo}>StrictDom<span style={s.logoAccent}>.</span></span>
-        <button style={{ background: 'none', border: 'none', color: '#555', cursor: 'pointer', fontFamily: 'sans-serif' }} onClick={() => setScreen('browse')}>Cancel</button>
+        <span style={s.logo}>StrictDom<span style={s.accent}>.</span></span>
       </nav>
-      <div style={{ ...s.body, padding: '24px 28px 60px' }}>
-        <h2 style={{ fontSize: '26px', fontWeight: 400, marginBottom: '6px' }}>Your profile</h2>
-        <p style={{ fontSize: '13px', color: '#666', marginBottom: '24px', fontFamily: 'sans-serif' }}>Handled with care and discretion.</p>
-        <div style={{ display: 'flex', gap: '6px', marginBottom: '28px' }}>
-          {[1, 2, 3].map(n => <div key={n} style={s.stepDot(step === n)} />)}
-        </div>
-        {step === 1 && <>
-          <label style={s.label}>Name</label>
-          <input style={s.input} placeholder="How should others address you?" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} />
-          <label style={s.label}>Age</label>
-          <input style={s.input} type="number" placeholder="Must be 18+" value={form.age} onChange={e => setForm(f => ({ ...f, age: e.target.value }))} />
-          <label style={s.label}>Location</label>
-          <input style={s.input} placeholder="City or region" value={form.location} onChange={e => setForm(f => ({ ...f, location: e.target.value }))} />
-          <label style={s.label}>Your role</label>
-          <div style={{ display: 'flex', gap: '8px', marginBottom: '24px' }}>
-            {['Dom', 'Sub', 'Switch'].map(r => (
-              <button key={r} style={s.roleBtn(form.role === r, r)} onClick={() => setForm(f => ({ ...f, role: r }))}>
-                {r === 'Dom' ? 'Dominant' : r === 'Sub' ? 'Submissive' : 'Switch'}
-              </button>
-            ))}
-          </div>
-          <button style={s.btn()} onClick={() => form.name && form.age >= 18 && setStep(2)}>Continue →</button>
-        </>}
-        {step === 2 && <>
-          <label style={s.label}>About you</label>
-          <textarea style={{ ...s.input, resize: 'vertical', minHeight: 90 }} placeholder="Describe yourself and what you're looking for..." value={form.bio} onChange={e => setForm(f => ({ ...f, bio: e.target.value }))} />
-          <label style={s.label}>Interests</label>
-          <div style={{ display: 'flex', flexWrap: 'wrap', marginBottom: '24px' }}>
-            {KINKS.map(k => <button key={k} style={s.kinkPill(form.kinks.includes(k))} onClick={() => toggleKink(k)}>{k}</button>)}
-          </div>
-          <button style={s.btn()} onClick={() => setStep(3)}>Continue →</button>
-        </>}
-        {step === 3 && <>
-          <label style={s.label}>Task style (optional)</label>
-          <div style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}>
-            <input style={{ ...s.input, marginBottom: 0, flex: 1 }} placeholder="e.g. Daily check-ins" value={taskInput} onChange={e => setTaskInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && addTask()} />
-            <button style={{ ...s.btn(), width: 'auto', padding: '12px 18px', marginBottom: 0 }} onClick={addTask}>Add</button>
-          </div>
-          {form.tasks.map(t => <div key={t} style={{ fontSize: '14px', color: '#aaa', padding: '8px 0', borderBottom: '1px solid #1a1a25', fontFamily: 'sans-serif' }}>· {t}</div>)}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', margin: '24px 0' }}>
-            <div>
-              <div style={s.label}>Private profile</div>
-              <div style={{ fontSize: '12px', color: '#555', fontFamily: 'sans-serif' }}>Only visible to approved connections</div>
-            </div>
-            <button style={s.toggle(form.is_private)} onClick={() => setForm(f => ({ ...f, is_private: !f.is_private }))}>
-              <div style={s.toggleThumb(form.is_private)} />
+      <div style={{ ...s.body, padding: '28px 24px' }}>
+        <h2 style={{ fontSize: '24px', fontWeight: 400, marginBottom: '6px' }}>Set up your profile</h2>
+        <p style={{ fontSize: '13px', color: '#555', marginBottom: '24px', fontFamily: 'sans-serif' }}>This is how others will know you.</p>
+        <label style={s.label}>Name</label>
+        <input style={s.input} placeholder="Your name" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} />
+        <label style={s.label}>Age</label>
+        <input style={s.input} type="number" placeholder="Must be 18+" value={form.age} onChange={e => setForm(f => ({ ...f, age: e.target.value }))} />
+        <label style={s.label}>I am a</label>
+        <div style={{ display: 'flex', gap: '8px', marginBottom: '14px' }}>
+          {['Dom', 'Sub', 'Switch'].map(r => (
+            <button key={r} style={s.roleBtn(form.role === r, r)} onClick={() => setForm(f => ({ ...f, role: r }))}>
+              {r === 'Dom' ? 'Dominant' : r === 'Sub' ? 'Submissive' : 'Switch'}
             </button>
-          </div>
-          <button style={s.btn()} onClick={handleCreateProfile} disabled={loading}>
-            {loading ? 'Saving...' : 'Create Profile'}
-          </button>
-        </>}
+          ))}
+        </div>
+        <label style={s.label}>Bio</label>
+        <textarea style={{ ...s.input, minHeight: 80, resize: 'vertical' }} placeholder="A little about yourself..." value={form.bio} onChange={e => setForm(f => ({ ...f, bio: e.target.value }))} />
+        <button style={s.btn()} onClick={handleCreateProfile} disabled={loading}>{loading ? 'Saving...' : 'Continue'}</button>
       </div>
+      {notification && <div style={s.notif}>{notification}</div>}
     </div>
   )
 
-  // PROFILE DETAIL
-  if (screen === 'profile' && selectedProfile) {
-    const p = selectedProfile
+  // HOME
+  if (screen === 'home') return (
+    <div style={s.app}>
+      <nav style={s.nav}>
+        <span style={s.logo}>StrictDom<span style={s.accent}>.</span></span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <span style={{ ...s.badge(profile?.role), fontSize: '10px' }}>{profile?.role}</span>
+          <button style={{ background: 'none', border: 'none', color: '#444', cursor: 'pointer', fontSize: '12px', fontFamily: 'sans-serif' }} onClick={() => signOut(auth)}>Sign out</button>
+        </div>
+      </nav>
+      <div style={s.body}>
+        <div style={{ padding: '20px 24px 16px' }}>
+          <div style={{ fontSize: '20px', fontWeight: 400, marginBottom: '4px' }}>Hey, {profile?.name} 👋</div>
+          <div style={{ fontSize: '13px', color: '#555', fontFamily: 'sans-serif' }}>{connections.length} active connection{connections.length !== 1 ? 's' : ''}</div>
+        </div>
+
+        {connections.length === 0 && (
+          <div style={{ ...s.section, textAlign: 'center' }}>
+            <div style={{ fontSize: '32px', marginBottom: '12px' }}>🔗</div>
+            <div style={{ fontSize: '15px', marginBottom: '6px' }}>No connections yet</div>
+            <div style={{ fontSize: '13px', color: '#555', fontFamily: 'sans-serif', marginBottom: '20px' }}>Invite someone or enter a PIN to connect</div>
+          </div>
+        )}
+
+        {connections.map(conn => (
+          <div key={conn.connId} style={s.card(false)} onClick={() => openConnection(conn)}>
+            <div style={s.avatar(conn.otherProfile.role)}>{conn.otherProfile.name?.[0]?.toUpperCase()}</div>
+            <div style={{ flex: 1 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '3px' }}>
+                <span style={{ fontSize: '16px', fontWeight: 500 }}>{conn.otherProfile.name}</span>
+                <span style={s.badge(conn.otherProfile.role)}>{conn.otherProfile.role}</span>
+              </div>
+              <div style={{ fontSize: '12px', color: '#555', fontFamily: 'sans-serif' }}>{conn.otherProfile.bio?.substring(0, 50)}...</div>
+            </div>
+            <div style={{ color: '#333', fontSize: '18px' }}>›</div>
+          </div>
+        ))}
+
+        <div style={{ padding: '24px' }}>
+          <div style={s.sLabel}>Invite someone</div>
+          <input style={s.input} type="email" placeholder="Their email address" value={inviteEmail} onChange={e => setInviteEmail(e.target.value)} />
+          <button style={s.btn()} onClick={handleSendInvite} disabled={loading}>Send Invite</button>
+          {invitePin && (
+            <div style={{ background: '#1e1e2c', borderRadius: '8px', padding: '16px', marginBottom: '16px', textAlign: 'center' }}>
+              <div style={{ fontSize: '11px', color: '#555', fontFamily: 'sans-serif', marginBottom: '8px', letterSpacing: '0.1em', textTransform: 'uppercase' }}>Share this PIN</div>
+              <div style={{ fontSize: '32px', fontWeight: 600, letterSpacing: '0.2em', color: '#c9a84c' }}>{invitePin}</div>
+              <div style={{ fontSize: '11px', color: '#555', fontFamily: 'sans-serif', marginTop: '8px' }}>Ask them to enter this PIN in the app</div>
+            </div>
+          )}
+          <div style={{ ...s.sLabel, marginTop: '8px' }}>Have a PIN?</div>
+          <input style={s.input} placeholder="Enter PIN code" value={enterPin} onChange={e => setEnterPin(e.target.value)} />
+          <button style={s.btn('#1e1e2c', '#e8e8e0')} onClick={handleAcceptInvite} disabled={loading}>Connect</button>
+        </div>
+      </div>
+      {notification && <div style={s.notif}>{notification}</div>}
+    </div>
+  )
+
+  // DYNAMIC SCREEN
+  if (screen === 'dynamic' && selectedConnection) {
+    const other = selectedConnection.otherProfile
+    const isDom = profile?.role === 'Dom' || profile?.role === 'Switch'
+    const chatId = [selectedConnection.domId, selectedConnection.subId].sort().join('_')
+
     return (
       <div style={s.app}>
         <nav style={s.nav}>
-          <span style={s.logo}>StrictDom<span style={s.logoAccent}>.</span></span>
-          <button style={{ background: 'none', border: 'none', color: '#555', cursor: 'pointer', fontFamily: 'sans-serif' }} onClick={() => setScreen('browse')}>← Back</button>
+          <button style={{ background: 'none', border: 'none', color: '#888', cursor: 'pointer', fontFamily: 'sans-serif', fontSize: '13px' }} onClick={() => setScreen('home')}>← Back</button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <div style={{ ...s.avatar(other.role), width: 32, height: 32, fontSize: '13px' }}>{other.name?.[0]?.toUpperCase()}</div>
+            <span style={{ fontSize: '16px', fontWeight: 500 }}>{other.name}</span>
+          </div>
+          <span style={s.badge(other.role)}>{other.role}</span>
         </nav>
-        <div style={{ ...s.body, padding: '28px 24px 60px' }}>
-          <div style={{ ...s.avatar(p.role), width: 72, height: 72, fontSize: '28px', marginBottom: '14px' }}>{p.name?.[0]?.toUpperCase()}</div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '6px' }}>
-            <span style={{ fontSize: '28px', fontWeight: 400 }}>{p.name}</span>
-            <span style={s.badge(p.role)}>{p.role}</span>
-          </div>
-          <div style={{ fontSize: '13px', color: '#555', fontFamily: 'sans-serif', marginBottom: '20px' }}>{p.age} · {p.location}</div>
-          <div style={s.section}>
-            <div style={s.sectionLabel}>About</div>
-            <p style={{ fontSize: '15px', lineHeight: 1.7, color: '#bbb', margin: 0 }}>{p.bio}</p>
-          </div>
-          {p.kinks?.length > 0 && (
-            <div style={s.section}>
-              <div style={s.sectionLabel}>Interests</div>
-              <div style={{ display: 'flex', flexWrap: 'wrap' }}>
-                {p.kinks.map(k => <span key={k} style={{ ...s.kinkPill(true), cursor: 'default' }}>{k}</span>)}
-              </div>
-            </div>
-          )}
-          {p.tasks?.length > 0 && (
-            <div style={s.section}>
-              <div style={s.sectionLabel}>Task Style</div>
-              {p.tasks.map(t => <div key={t} style={{ fontSize: '14px', color: '#aaa', padding: '8px 0', borderBottom: '1px solid #1a1a25', fontFamily: 'sans-serif' }}>· {t}</div>)}
-            </div>
-          )}
-          {user && (
-            <button style={{ ...s.btn(), margin: '24px 0 0' }}>Request Connection</button>
-          )}
+
+        {/* TABS */}
+        <div style={{ display: 'flex', borderBottom: '1px solid #1e1e2a', position: 'sticky', top: 57, background: '#0f0f14', zIndex: 9 }}>
+          {['messages', 'tasks', 'discipline', 'checkin'].map(tab => (
+            <button key={tab} style={s.tab(activeTab === tab)} onClick={() => setActiveTab(tab)}>
+              {tab === 'messages' ? '💬' : tab === 'tasks' ? '✅' : tab === 'discipline' ? '📓' : '🌡️'}
+            </button>
+          ))}
         </div>
+
+        {/* MESSAGES */}
+        {activeTab === 'messages' && (
+          <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 120px)' }}>
+            <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px' }}>
+              {messages.length === 0 && (
+                <div style={{ textAlign: 'center', color: '#444', fontFamily: 'sans-serif', fontSize: '13px', marginTop: '40px' }}>No messages yet. Say hello! 👋</div>
+              )}
+              {messages.map(m => (
+                <div key={m.id} style={s.msg(m.senderId === user.uid)}>
+                  <div style={s.msgBubble(m.senderId === user.uid)}>{m.text}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{ padding: '12px 16px', borderTop: '1px solid #1e1e2a', display: 'flex', gap: '8px' }}>
+              <input style={{ ...s.input, marginBottom: 0, flex: 1 }} placeholder="Type a message..." value={newMessage} onChange={e => setNewMessage(e.target.value)} onKeyDown={e => e.key === 'Enter' && sendMessage()} />
+              <button style={{ ...s.btn(), width: 'auto', padding: '12px 18px', marginBottom: 0 }} onClick={sendMessage}>Send</button>
+            </div>
+          </div>
+        )}
+
+        {/* TASKS */}
+        {activeTab === 'tasks' && (
+          <div style={{ ...s.body, padding: '20px 24px' }}>
+            <div style={s.sLabel}>Tasks & Rules</div>
+            {isDom && (
+              <div style={{ display: 'flex', gap: '8px', marginBottom: '20px' }}>
+                <input style={{ ...s.input, marginBottom: 0, flex: 1 }} placeholder="Add a task or rule..." value={newTask} onChange={e => setNewTask(e.target.value)} onKeyDown={e => e.key === 'Enter' && addTask()} />
+                <button style={{ ...s.btn(), width: 'auto', padding: '12px 18px', marginBottom: 0 }} onClick={addTask}>Add</button>
+              </div>
+            )}
+            {tasks.length === 0 && <div style={{ color: '#444', fontFamily: 'sans-serif', fontSize: '13px' }}>No tasks yet.</div>}
+            {tasks.map(t => (
+              <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '12px 0', borderBottom: '1px solid #1a1a25', cursor: 'pointer' }} onClick={() => toggleTask(t)}>
+                <div style={{ width: 20, height: 20, borderRadius: '50%', border: `2px solid ${t.completed ? '#c9a84c' : '#333'}`, background: t.completed ? '#c9a84c' : 'transparent', flexShrink: 0 }} />
+                <span style={{ fontSize: '14px', fontFamily: 'sans-serif', color: t.completed ? '#555' : '#e8e8e0', textDecoration: t.completed ? 'line-through' : 'none' }}>{t.text}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* DISCIPLINE LOG */}
+        {activeTab === 'discipline' && (
+          <div style={{ ...s.body, padding: '20px 24px' }}>
+            <div style={s.sLabel}>Discipline Log</div>
+            {isDom && (
+              <div style={{ marginBottom: '20px' }}>
+                <textarea style={{ ...s.input, minHeight: 80, resize: 'vertical' }} placeholder="Add a note..." value={newNote} onChange={e => setNewNote(e.target.value)} />
+                <button style={s.btn()} onClick={addDisciplineNote}>Add Note</button>
+              </div>
+            )}
+            {disciplineLog.length === 0 && <div style={{ color: '#444', fontFamily: 'sans-serif', fontSize: '13px' }}>No notes yet.</div>}
+            {disciplineLog.map(d => (
+              <div key={d.id} style={{ background: '#13131a', borderRadius: '8px', padding: '14px', marginBottom: '10px' }}>
+                <div style={{ fontSize: '11px', color: '#555', fontFamily: 'sans-serif', marginBottom: '6px' }}>{d.addedByName}</div>
+                <div style={{ fontSize: '14px', fontFamily: 'sans-serif', color: '#bbb', lineHeight: 1.6 }}>{d.note}</div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* CHECK-IN */}
+        {activeTab === 'checkin' && (
+          <div style={{ ...s.body, padding: '20px 24px' }}>
+            <div style={s.sLabel}>Mood Check-in</div>
+            {!isDom ? (
+              <>
+                <p style={{ fontSize: '13px', color: '#666', fontFamily: 'sans-serif', marginBottom: '20px' }}>How are you feeling today?</p>
+                <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', marginBottom: '20px' }}>
+                  {['😊 Happy', '😌 Calm', '😔 Sad', '😤 Frustrated', '🥰 Loved', '😰 Anxious'].map(m => (
+                    <button key={m} style={{ padding: '10px 16px', borderRadius: '20px', border: `1px solid ${mood === m ? '#c9a84c' : '#222'}`, background: mood === m ? '#1e1e2c' : 'transparent', color: mood === m ? '#c9a84c' : '#666', fontFamily: 'sans-serif', fontSize: '13px', cursor: 'pointer' }} onClick={() => setMood(m)}>{m}</button>
+                  ))}
+                </div>
+                <button style={s.btn()} onClick={submitMood}>Submit Check-in</button>
+              </>
+            ) : (
+              <p style={{ fontSize: '14px', color: '#666', fontFamily: 'sans-serif' }}>Your sub's check-ins will appear here.</p>
+            )}
+          </div>
+        )}
+        {notification && <div style={s.notif}>{notification}</div>}
       </div>
     )
   }
 
-  // BROWSE
-  return (
-    <div style={s.app}>
-      <nav style={s.nav}>
-        <span style={s.logo}>StrictDom<span style={s.logoAccent}>.</span></span>
-        <div style={{ display: 'flex', gap: '10px' }}>
-          {user ? (
-            <>
-              <button style={{ background: 'none', border: '1px solid #222', color: '#888', borderRadius: '20px', padding: '6px 14px', cursor: 'pointer', fontSize: '12px', fontFamily: 'sans-serif' }} onClick={() => setScreen('create')}>+ Profile</button>
-              <button style={{ background: 'none', border: 'none', color: '#555', cursor: 'pointer', fontSize: '12px', fontFamily: 'sans-serif' }} onClick={handleSignOut}>Sign out</button>
-            </>
-          ) : (
-            <button style={{ background: 'none', border: '1px solid #222', color: '#888', borderRadius: '20px', padding: '6px 14px', cursor: 'pointer', fontSize: '12px', fontFamily: 'sans-serif' }} onClick={() => setScreen('auth')}>Sign in</button>
-          )}
-        </div>
-      </nav>
-      <div style={s.body}>
-        <div style={{ padding: '20px 20px 16px', borderBottom: '1px solid #1a1a25' }}>
-          <div style={{ fontSize: '11px', letterSpacing: '0.15em', color: '#555', fontFamily: 'sans-serif', textTransform: 'uppercase', marginBottom: '14px' }}>
-            {loading ? 'Loading...' : `${filteredProfiles.length} profiles`}
-          </div>
-          <div style={{ display: 'flex', gap: '8px' }}>
-            {['All', 'Dom', 'Sub', 'Switch'].map(r => (
-              <button key={r} style={s.filterBtn(filterRole === r)} onClick={() => setFilterRole(r)}>{r}</button>
-            ))}
-          </div>
-        </div>
-        {filteredProfiles.length === 0 && !loading && (
-          <div style={{ padding: '60px 24px', textAlign: 'center', color: '#444', fontFamily: 'sans-serif', fontSize: '14px' }}>
-            No profiles yet. Be the first to create one!
-          </div>
-        )}
-        {filteredProfiles.map(p => (
-          <div key={p.id} style={s.card} onClick={() => { setSelectedProfile(p); setScreen('profile') }}>
-            <div style={s.avatar(p.role)}>{p.name?.[0]?.toUpperCase()}</div>
-            <div style={{ flex: 1 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
-                <span style={{ fontSize: '17px', fontWeight: 500 }}>{p.name}</span>
-                <span style={s.badge(p.role)}>{p.role}</span>
-              </div>
-              <p style={{ fontSize: '13px', color: '#777', lineHeight: 1.55, fontFamily: 'sans-serif', margin: '0 0 8px', overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }}>{p.bio}</p>
-              <div style={{ fontSize: '12px', color: '#555', fontFamily: 'sans-serif' }}>{p.age} · {p.location}</div>
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  )
+  return <div style={s.app}><div style={s.center}>Loading...</div></div>
 }
