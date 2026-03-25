@@ -1,5 +1,20 @@
 import { useState, useEffect } from 'react'
-import { supabase } from './supabaseClient'
+import { auth, db } from './firebaseClient'
+import {
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  signOut,
+  onAuthStateChanged
+} from 'firebase/auth'
+import {
+  collection,
+  addDoc,
+  getDocs,
+  doc,
+  setDoc,
+  query,
+  where
+} from 'firebase/firestore'
 
 const KINKS = [
   "Bondage", "Discipline", "Dominance", "Submission",
@@ -16,7 +31,7 @@ const roleColors = {
 
 export default function App() {
   const [screen, setScreen] = useState('onboarding')
-  const [session, setSession] = useState(null)
+  const [user, setUser] = useState(null)
   const [profiles, setProfiles] = useState([])
   const [selectedProfile, setSelectedProfile] = useState(null)
   const [filterRole, setFilterRole] = useState('All')
@@ -32,63 +47,61 @@ export default function App() {
   const [taskInput, setTaskInput] = useState('')
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session)
-      if (session) {
-        setScreen('browse')
-        fetchProfiles()
-      }
+    const unsub = onAuthStateChanged(auth, (u) => {
+      setUser(u)
+      if (u) { setScreen('browse'); fetchProfiles() }
     })
-    supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session)
-    })
+    return () => unsub()
   }, [])
 
   const fetchProfiles = async () => {
     setLoading(true)
-    const { data, error } = await supabase
-      .from('profiles')
-      .select('*')
-      .eq('is_private', false)
-    if (!error) setProfiles(data || [])
+    try {
+      const q = query(collection(db, 'profiles'), where('is_private', '==', false))
+      const snapshot = await getDocs(q)
+      setProfiles(snapshot.docs.map(d => ({ id: d.id, ...d.data() })))
+    } catch (e) { console.error(e) }
     setLoading(false)
   }
 
   const handleAuth = async () => {
     setLoading(true)
-    if (authMode === 'signup') {
-      const { error } = await supabase.auth.signUp({ email, password })
-      if (error) alert(error.message)
-      else { alert('Check your email to confirm your account!') }
-    } else {
-      const { error } = await supabase.auth.signInWithPassword({ email, password })
-      if (error) alert(error.message)
-      else { setScreen('browse'); fetchProfiles() }
-    }
+    try {
+      if (authMode === 'signup') {
+        await createUserWithEmailAndPassword(auth, email, password)
+        setScreen('create')
+      } else {
+        await signInWithEmailAndPassword(auth, email, password)
+        setScreen('browse')
+        fetchProfiles()
+      }
+    } catch (e) { alert(e.message) }
     setLoading(false)
   }
 
   const handleCreateProfile = async () => {
     setLoading(true)
-    const { error } = await supabase.from('profiles').upsert({
-      id: session.user.id,
-      name: form.name,
-      age: parseInt(form.age),
-      role: form.role,
-      bio: form.bio,
-      location: form.location,
-      kinks: form.kinks,
-      tasks: form.tasks,
-      is_private: form.is_private,
-    })
-    if (error) alert(error.message)
-    else { setScreen('browse'); fetchProfiles() }
+    try {
+      await setDoc(doc(db, 'profiles', user.uid), {
+        name: form.name,
+        age: parseInt(form.age),
+        role: form.role,
+        bio: form.bio,
+        location: form.location,
+        kinks: form.kinks,
+        tasks: form.tasks,
+        is_private: form.is_private,
+        createdAt: new Date()
+      })
+      setScreen('browse')
+      fetchProfiles()
+    } catch (e) { alert(e.message) }
     setLoading(false)
   }
 
   const handleSignOut = async () => {
-    await supabase.auth.signOut()
-    setSession(null)
+    await signOut(auth)
+    setUser(null)
     setScreen('onboarding')
     setProfiles([])
   }
@@ -112,7 +125,7 @@ export default function App() {
   )
 
   const s = {
-    app: { minHeight: '100vh', background: '#0f0f14', color: '#e8e8e0', fontFamily: "'Georgia, serif'" },
+    app: { minHeight: '100vh', background: '#0f0f14', color: '#e8e8e0', fontFamily: 'Georgia, serif' },
     nav: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '20px 28px', borderBottom: '1px solid #1e1e2a', position: 'sticky', top: 0, background: '#0f0f14', zIndex: 10 },
     logo: { fontSize: '22px', fontWeight: 600, letterSpacing: '0.12em' },
     logoAccent: { color: '#c9a84c' },
@@ -122,7 +135,7 @@ export default function App() {
     heroSub: { fontSize: '16px', color: '#888', lineHeight: 1.7, marginBottom: '44px', maxWidth: 320, fontFamily: 'sans-serif', fontWeight: 300 },
     pillBtn: (active) => ({ padding: '13px 32px', borderRadius: '40px', fontSize: '14px', fontFamily: 'sans-serif', fontWeight: 500, letterSpacing: '0.08em', cursor: 'pointer', transition: 'all 0.2s', border: active ? 'none' : '1px solid #333', background: active ? '#c9a84c' : 'transparent', color: active ? '#0f0f14' : '#e8e8e0' }),
     input: { width: '100%', background: '#13131a', border: '1px solid #1e1e2c', borderRadius: '6px', padding: '12px 14px', color: '#e8e8e0', fontSize: '15px', fontFamily: 'Georgia, serif', marginBottom: '16px', boxSizing: 'border-box', outline: 'none' },
-    btn: (color) => ({ width: '100%', padding: '14px', borderRadius: '6px', background: color || '#c9a84c', color: '#0f0f14', border: 'none', fontSize: '14px', fontFamily: 'sans-serif', fontWeight: 600, letterSpacing: '0.08em', cursor: 'pointer', marginBottom: '10px' }),
+    btn: (color) => ({ width: '100%', padding: '14px', borderRadius: '6px', background: color || '#c9a84c', color: color ? '#e8e8e0' : '#0f0f14', border: 'none', fontSize: '14px', fontFamily: 'sans-serif', fontWeight: 600, letterSpacing: '0.08em', cursor: 'pointer', marginBottom: '10px' }),
     label: { display: 'block', fontSize: '10px', letterSpacing: '0.15em', color: '#555', fontFamily: 'sans-serif', textTransform: 'uppercase', marginBottom: '8px', fontWeight: 600 },
     card: { background: '#13131a', padding: '22px 20px', cursor: 'pointer', borderBottom: '1px solid #1a1a25', display: 'flex', alignItems: 'flex-start', gap: '16px' },
     avatar: (role) => ({ width: 52, height: 52, borderRadius: '50%', background: '#1e1e2c', border: `2px solid ${roleColors[role]?.accent || '#333'}`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '20px', fontWeight: 600, flexShrink: 0, color: roleColors[role]?.accent || '#ccc' }),
@@ -170,7 +183,7 @@ export default function App() {
         <button style={s.btn()} onClick={handleAuth} disabled={loading}>
           {loading ? 'Please wait...' : authMode === 'login' ? 'Sign In' : 'Create Account'}
         </button>
-        <button style={{ ...s.btn('#1e1e2c'), color: '#888' }} onClick={() => setAuthMode(authMode === 'login' ? 'signup' : 'login')}>
+        <button style={s.btn('#1e1e2c')} onClick={() => setAuthMode(authMode === 'login' ? 'signup' : 'login')}>
           {authMode === 'login' ? "Don't have an account? Sign up" : 'Already have an account? Sign in'}
         </button>
       </div>
@@ -190,7 +203,6 @@ export default function App() {
         <div style={{ display: 'flex', gap: '6px', marginBottom: '28px' }}>
           {[1, 2, 3].map(n => <div key={n} style={s.stepDot(step === n)} />)}
         </div>
-
         {step === 1 && <>
           <label style={s.label}>Name</label>
           <input style={s.input} placeholder="How should others address you?" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} />
@@ -208,7 +220,6 @@ export default function App() {
           </div>
           <button style={s.btn()} onClick={() => form.name && form.age >= 18 && setStep(2)}>Continue →</button>
         </>}
-
         {step === 2 && <>
           <label style={s.label}>About you</label>
           <textarea style={{ ...s.input, resize: 'vertical', minHeight: 90 }} placeholder="Describe yourself and what you're looking for..." value={form.bio} onChange={e => setForm(f => ({ ...f, bio: e.target.value }))} />
@@ -218,7 +229,6 @@ export default function App() {
           </div>
           <button style={s.btn()} onClick={() => setStep(3)}>Continue →</button>
         </>}
-
         {step === 3 && <>
           <label style={s.label}>Task style (optional)</label>
           <div style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}>
@@ -277,7 +287,7 @@ export default function App() {
               {p.tasks.map(t => <div key={t} style={{ fontSize: '14px', color: '#aaa', padding: '8px 0', borderBottom: '1px solid #1a1a25', fontFamily: 'sans-serif' }}>· {t}</div>)}
             </div>
           )}
-          {session && (
+          {user && (
             <button style={{ ...s.btn(), margin: '24px 0 0' }}>Request Connection</button>
           )}
         </div>
@@ -291,7 +301,7 @@ export default function App() {
       <nav style={s.nav}>
         <span style={s.logo}>StrictDom<span style={s.logoAccent}>.</span></span>
         <div style={{ display: 'flex', gap: '10px' }}>
-          {session ? (
+          {user ? (
             <>
               <button style={{ background: 'none', border: '1px solid #222', color: '#888', borderRadius: '20px', padding: '6px 14px', cursor: 'pointer', fontSize: '12px', fontFamily: 'sans-serif' }} onClick={() => setScreen('create')}>+ Profile</button>
               <button style={{ background: 'none', border: 'none', color: '#555', cursor: 'pointer', fontSize: '12px', fontFamily: 'sans-serif' }} onClick={handleSignOut}>Sign out</button>
