@@ -9,10 +9,35 @@ import {
 import {
   collection, doc, setDoc, getDoc, getDocs,
   addDoc, query, where, orderBy, onSnapshot,
-  serverTimestamp, updateDoc, arrayUnion
+  serverTimestamp, updateDoc
 } from 'firebase/firestore'
 
 const roleColors = { Dom: '#c9a84c', Sub: '#8b5cf6', Switch: '#06b6d4' }
+
+function Checkins({ connId }) {
+  const [checkins, setCheckins] = useState([])
+  useEffect(() => {
+    const q = query(collection(db, 'checkins'), where('connId', '==', connId), orderBy('createdAt', 'desc'))
+    const unsub = onSnapshot(q, (snap) => {
+      setCheckins(snap.docs.map(d => ({ id: d.id, ...d.data() })))
+    })
+    return () => unsub()
+  }, [connId])
+  return (
+    <>
+      <p style={{ fontSize: '13px', color: '#666', fontFamily: 'sans-serif', marginBottom: '16px' }}>Your sub's mood check-ins:</p>
+      {checkins.length === 0 && <div style={{ color: '#444', fontFamily: 'sans-serif', fontSize: '13px' }}>No check-ins yet.</div>}
+      {checkins.map(c => (
+        <div key={c.id} style={{ background: '#13131a', borderRadius: '8px', padding: '14px', marginBottom: '10px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <span style={{ fontSize: '16px', fontFamily: 'sans-serif' }}>{c.mood}</span>
+          <span style={{ fontSize: '11px', color: '#555', fontFamily: 'sans-serif' }}>
+            {c.createdAt?.toDate?.()?.toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+          </span>
+        </div>
+      ))}
+    </>
+  )
+}
 
 export default function App() {
   const [user, setUser] = useState(null)
@@ -112,13 +137,9 @@ export default function App() {
     try {
       const pin = generatePin()
       await addDoc(collection(db, 'invites'), {
-        fromId: user.uid,
-        fromName: profile.name,
-        fromRole: profile.role,
-        toEmail: inviteEmail,
-        pin,
-        status: 'pending',
-        createdAt: serverTimestamp()
+        fromId: user.uid, fromName: profile.name,
+        fromRole: profile.role, toEmail: inviteEmail,
+        pin, status: 'pending', createdAt: serverTimestamp()
       })
       setInvitePin(pin)
       notify('Invite created! Share this PIN with them.')
@@ -138,9 +159,7 @@ export default function App() {
       const isDomInviting = inviteData.fromRole === 'Dom'
       const domId = isDomInviting ? inviteData.fromId : user.uid
       const subId = isDomInviting ? user.uid : inviteData.fromId
-      await addDoc(collection(db, 'connections'), {
-        domId, subId, status: 'active', createdAt: serverTimestamp()
-      })
+      await addDoc(collection(db, 'connections'), { domId, subId, status: 'active', createdAt: serverTimestamp() })
       await updateDoc(doc(db, 'invites', invite.id), { status: 'accepted' })
       notify('🎉 Connection established!')
       setEnterPin('')
@@ -169,10 +188,8 @@ export default function App() {
     if (!newMessage.trim()) return
     const chatId = [selectedConnection.domId, selectedConnection.subId].sort().join('_')
     await addDoc(collection(db, 'messages'), {
-      chatId, senderId: user.uid,
-      senderName: profile.name,
-      text: newMessage.trim(),
-      createdAt: serverTimestamp()
+      chatId, senderId: user.uid, senderName: profile.name,
+      text: newMessage.trim(), createdAt: serverTimestamp()
     })
     setNewMessage('')
   }
@@ -180,11 +197,8 @@ export default function App() {
   const addTask = async () => {
     if (!newTask.trim()) return
     const ref = await addDoc(collection(db, 'tasks'), {
-      connId: selectedConnection.connId,
-      text: newTask.trim(),
-      completed: false,
-      createdBy: user.uid,
-      createdAt: serverTimestamp()
+      connId: selectedConnection.connId, text: newTask.trim(),
+      completed: false, createdBy: user.uid, createdAt: serverTimestamp()
     })
     setTasks(t => [...t, { id: ref.id, text: newTask.trim(), completed: false }])
     setNewTask('')
@@ -198,21 +212,17 @@ export default function App() {
   const addDisciplineNote = async () => {
     if (!newNote.trim()) return
     const ref = await addDoc(collection(db, 'disciplineLog'), {
-      connId: selectedConnection.connId,
-      note: newNote.trim(),
-      addedBy: user.uid,
-      addedByName: profile.name,
-      createdAt: serverTimestamp()
+      connId: selectedConnection.connId, note: newNote.trim(),
+      addedBy: user.uid, addedByName: profile.name, createdAt: serverTimestamp()
     })
     setDisciplineLog(d => [...d, { id: ref.id, note: newNote.trim(), addedByName: profile.name }])
     setNewNote('')
   }
 
   const submitMood = async () => {
-    if (!mood) return
+    if (!mood) return notify('Select a mood first')
     await addDoc(collection(db, 'checkins'), {
-      connId: selectedConnection.connId,
-      subId: user.uid,
+      connId: selectedConnection.connId, subId: user.uid,
       mood, createdAt: serverTimestamp()
     })
     notify('Check-in submitted ✓')
@@ -229,21 +239,18 @@ export default function App() {
     input: { width: '100%', background: '#13131a', border: '1px solid #1e1e2c', borderRadius: '6px', padding: '12px 14px', color: '#e8e8e0', fontSize: '15px', fontFamily: 'Georgia, serif', marginBottom: '14px', boxSizing: 'border-box', outline: 'none' },
     btn: (bg, color) => ({ width: '100%', padding: '13px', borderRadius: '6px', background: bg || '#c9a84c', color: color || '#0f0f14', border: 'none', fontSize: '14px', fontFamily: 'sans-serif', fontWeight: 600, letterSpacing: '0.06em', cursor: 'pointer', marginBottom: '10px' }),
     label: { display: 'block', fontSize: '10px', letterSpacing: '0.15em', color: '#555', fontFamily: 'sans-serif', textTransform: 'uppercase', marginBottom: '8px', fontWeight: 600 },
-    card: (active) => ({ background: active ? '#1a1a26' : '#13131a', padding: '18px 20px', cursor: 'pointer', borderBottom: '1px solid #1a1a25', display: 'flex', alignItems: 'center', gap: '14px' }),
+    card: { background: '#13131a', padding: '18px 20px', cursor: 'pointer', borderBottom: '1px solid #1a1a25', display: 'flex', alignItems: 'center', gap: '14px' },
     avatar: (role) => ({ width: 46, height: 46, borderRadius: '50%', background: '#1e1e2c', border: `2px solid ${roleColors[role] || '#333'}`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '18px', fontWeight: 600, flexShrink: 0, color: roleColors[role] || '#ccc' }),
     badge: (role) => ({ fontSize: '9px', fontFamily: 'sans-serif', letterSpacing: '0.1em', fontWeight: 600, color: roleColors[role] || '#ccc', border: `1px solid ${roleColors[role] || '#555'}`, padding: '2px 6px', borderRadius: '20px', textTransform: 'uppercase' }),
-    tab: (active) => ({ flex: 1, padding: '10px', background: active ? '#1e1e2c' : 'transparent', border: 'none', borderBottom: active ? `2px solid #c9a84c` : '2px solid transparent', color: active ? '#c9a84c' : '#555', fontSize: '12px', fontFamily: 'sans-serif', letterSpacing: '0.08em', cursor: 'pointer', textTransform: 'uppercase' }),
+    tab: (active) => ({ flex: 1, padding: '10px', background: active ? '#1e1e2c' : 'transparent', border: 'none', borderBottom: active ? '2px solid #c9a84c' : '2px solid transparent', color: active ? '#c9a84c' : '#555', fontSize: '12px', fontFamily: 'sans-serif', letterSpacing: '0.08em', cursor: 'pointer', textTransform: 'uppercase' }),
     msg: (mine) => ({ display: 'flex', justifyContent: mine ? 'flex-end' : 'flex-start', marginBottom: '10px' }),
     msgBubble: (mine) => ({ maxWidth: '75%', padding: '10px 14px', borderRadius: mine ? '16px 16px 4px 16px' : '16px 16px 16px 4px', background: mine ? '#c9a84c' : '#1e1e2c', color: mine ? '#0f0f14' : '#e8e8e0', fontSize: '14px', fontFamily: 'sans-serif', lineHeight: 1.5 }),
     roleBtn: (active, role) => ({ flex: 1, padding: '11px', borderRadius: '6px', fontSize: '13px', fontFamily: 'sans-serif', fontWeight: 500, cursor: 'pointer', border: `1px solid ${active ? roleColors[role] : '#1e1e2c'}`, background: active ? '#1e1e2c' : 'transparent', color: active ? roleColors[role] : '#555' }),
     section: { padding: '20px 24px', borderBottom: '1px solid #1a1a25' },
     sLabel: { fontSize: '10px', letterSpacing: '0.15em', color: '#555', fontFamily: 'sans-serif', fontWeight: 600, textTransform: 'uppercase', marginBottom: '12px' },
     notif: { position: 'fixed', bottom: 80, left: '50%', transform: 'translateX(-50%)', background: '#c9a84c', color: '#0f0f14', padding: '10px 20px', borderRadius: '20px', fontSize: '13px', fontFamily: 'sans-serif', fontWeight: 600, zIndex: 100, whiteSpace: 'nowrap' },
-    bottomNav: { position: 'fixed', bottom: 0, left: 0, right: 0, background: '#0f0f14', borderTop: '1px solid #1e1e2a', display: 'flex', zIndex: 10 },
-    bottomBtn: (active) => ({ flex: 1, padding: '12px', background: 'none', border: 'none', color: active ? '#c9a84c' : '#444', fontSize: '11px', fontFamily: 'sans-serif', cursor: 'pointer', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '3px' }),
   }
 
-  // ONBOARDING
   if (screen === 'onboarding') return (
     <div style={s.app}>
       <div style={s.center}>
@@ -251,15 +258,14 @@ export default function App() {
         <h1 style={{ fontSize: '48px', fontWeight: 300, lineHeight: 1.1, marginBottom: '16px', letterSpacing: '0.04em' }}>StrictDom<span style={s.accent}>.</span></h1>
         <p style={{ fontSize: '15px', color: '#666', lineHeight: 1.7, marginBottom: '40px', maxWidth: 300, fontFamily: 'sans-serif', fontWeight: 300 }}>A private space for Doms and Subs to connect, grow, and maintain their dynamic.</p>
         <div style={{ display: 'flex', gap: '12px' }}>
-          <button style={{ ...s.btn(), width: 'auto', padding: '13px 32px', borderRadius: '40px', marginBottom: 0 }} onClick={() => { setAuthMode('signup'); setScreen('auth') }}>Get Started</button>
-          <button style={{ ...s.btn('#transparent', '#e8e8e0'), width: 'auto', padding: '13px 32px', borderRadius: '40px', border: '1px solid #333', marginBottom: 0 }} onClick={() => { setAuthMode('login'); setScreen('auth') }}>Sign In</button>
+          <button style={{ padding: '13px 32px', borderRadius: '40px', background: '#c9a84c', color: '#0f0f14', border: 'none', fontFamily: 'sans-serif', fontWeight: 600, cursor: 'pointer' }} onClick={() => { setAuthMode('signup'); setScreen('auth') }}>Get Started</button>
+          <button style={{ padding: '13px 32px', borderRadius: '40px', background: 'transparent', color: '#e8e8e0', border: '1px solid #333', fontFamily: 'sans-serif', cursor: 'pointer' }} onClick={() => { setAuthMode('login'); setScreen('auth') }}>Sign In</button>
         </div>
         <p style={{ marginTop: '40px', fontSize: '11px', color: '#333', fontFamily: 'sans-serif' }}>18+ only · Safe, sane & consensual</p>
       </div>
     </div>
   )
 
-  // AUTH
   if (screen === 'auth') return (
     <div style={s.app}>
       <nav style={s.nav}>
@@ -282,7 +288,6 @@ export default function App() {
     </div>
   )
 
-  // CREATE PROFILE
   if (screen === 'create') return (
     <div style={s.app}>
       <nav style={s.nav}>
@@ -311,13 +316,12 @@ export default function App() {
     </div>
   )
 
-  // HOME
   if (screen === 'home') return (
     <div style={s.app}>
       <nav style={s.nav}>
         <span style={s.logo}>StrictDom<span style={s.accent}>.</span></span>
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-          <span style={{ ...s.badge(profile?.role), fontSize: '10px' }}>{profile?.role}</span>
+          <span style={s.badge(profile?.role)}>{profile?.role}</span>
           <button style={{ background: 'none', border: 'none', color: '#444', cursor: 'pointer', fontSize: '12px', fontFamily: 'sans-serif' }} onClick={() => signOut(auth)}>Sign out</button>
         </div>
       </nav>
@@ -326,7 +330,6 @@ export default function App() {
           <div style={{ fontSize: '20px', fontWeight: 400, marginBottom: '4px' }}>Hey, {profile?.name} 👋</div>
           <div style={{ fontSize: '13px', color: '#555', fontFamily: 'sans-serif' }}>{connections.length} active connection{connections.length !== 1 ? 's' : ''}</div>
         </div>
-
         {connections.length === 0 && (
           <div style={{ ...s.section, textAlign: 'center' }}>
             <div style={{ fontSize: '32px', marginBottom: '12px' }}>🔗</div>
@@ -334,21 +337,19 @@ export default function App() {
             <div style={{ fontSize: '13px', color: '#555', fontFamily: 'sans-serif', marginBottom: '20px' }}>Invite someone or enter a PIN to connect</div>
           </div>
         )}
-
         {connections.map(conn => (
-          <div key={conn.connId} style={s.card(false)} onClick={() => openConnection(conn)}>
+          <div key={conn.connId} style={s.card} onClick={() => openConnection(conn)}>
             <div style={s.avatar(conn.otherProfile.role)}>{conn.otherProfile.name?.[0]?.toUpperCase()}</div>
             <div style={{ flex: 1 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '3px' }}>
                 <span style={{ fontSize: '16px', fontWeight: 500 }}>{conn.otherProfile.name}</span>
                 <span style={s.badge(conn.otherProfile.role)}>{conn.otherProfile.role}</span>
               </div>
-              <div style={{ fontSize: '12px', color: '#555', fontFamily: 'sans-serif' }}>{conn.otherProfile.bio?.substring(0, 50)}...</div>
+              <div style={{ fontSize: '12px', color: '#555', fontFamily: 'sans-serif' }}>{conn.otherProfile.bio?.substring(0, 50)}{conn.otherProfile.bio?.length > 50 ? '...' : ''}</div>
             </div>
             <div style={{ color: '#333', fontSize: '18px' }}>›</div>
           </div>
         ))}
-
         <div style={{ padding: '24px' }}>
           <div style={s.sLabel}>Invite someone</div>
           <input style={s.input} type="email" placeholder="Their email address" value={inviteEmail} onChange={e => setInviteEmail(e.target.value)} />
@@ -369,11 +370,9 @@ export default function App() {
     </div>
   )
 
-  // DYNAMIC SCREEN
   if (screen === 'dynamic' && selectedConnection) {
     const other = selectedConnection.otherProfile
     const isDom = profile?.role === 'Dom' || profile?.role === 'Switch'
-    const chatId = [selectedConnection.domId, selectedConnection.subId].sort().join('_')
 
     return (
       <div style={s.app}>
@@ -386,7 +385,6 @@ export default function App() {
           <span style={s.badge(other.role)}>{other.role}</span>
         </nav>
 
-        {/* TABS */}
         <div style={{ display: 'flex', borderBottom: '1px solid #1e1e2a', position: 'sticky', top: 57, background: '#0f0f14', zIndex: 9 }}>
           {['messages', 'tasks', 'discipline', 'checkin'].map(tab => (
             <button key={tab} style={s.tab(activeTab === tab)} onClick={() => setActiveTab(tab)}>
@@ -395,13 +393,10 @@ export default function App() {
           ))}
         </div>
 
-        {/* MESSAGES */}
         {activeTab === 'messages' && (
           <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 120px)' }}>
             <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px' }}>
-              {messages.length === 0 && (
-                <div style={{ textAlign: 'center', color: '#444', fontFamily: 'sans-serif', fontSize: '13px', marginTop: '40px' }}>No messages yet. Say hello! 👋</div>
-              )}
+              {messages.length === 0 && <div style={{ textAlign: 'center', color: '#444', fontFamily: 'sans-serif', fontSize: '13px', marginTop: '40px' }}>No messages yet. Say hello! 👋</div>}
               {messages.map(m => (
                 <div key={m.id} style={s.msg(m.senderId === user.uid)}>
                   <div style={s.msgBubble(m.senderId === user.uid)}>{m.text}</div>
@@ -415,7 +410,6 @@ export default function App() {
           </div>
         )}
 
-        {/* TASKS */}
         {activeTab === 'tasks' && (
           <div style={{ ...s.body, padding: '20px 24px' }}>
             <div style={s.sLabel}>Tasks & Rules</div>
@@ -435,7 +429,6 @@ export default function App() {
           </div>
         )}
 
-        {/* DISCIPLINE LOG */}
         {activeTab === 'discipline' && (
           <div style={{ ...s.body, padding: '20px 24px' }}>
             <div style={s.sLabel}>Discipline Log</div>
@@ -455,7 +448,6 @@ export default function App() {
           </div>
         )}
 
-        {/* CHECK-IN */}
         {activeTab === 'checkin' && (
           <div style={{ ...s.body, padding: '20px 24px' }}>
             <div style={s.sLabel}>Mood Check-in</div>
@@ -470,7 +462,7 @@ export default function App() {
                 <button style={s.btn()} onClick={submitMood}>Submit Check-in</button>
               </>
             ) : (
-              <p style={{ fontSize: '14px', color: '#666', fontFamily: 'sans-serif' }}>Your sub's check-ins will appear here.</p>
+              <Checkins connId={selectedConnection.connId} />
             )}
           </div>
         )}
